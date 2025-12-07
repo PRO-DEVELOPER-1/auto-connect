@@ -4,16 +4,18 @@ dotenv.config();
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import qrcode from 'qrcode';
-import {
+import { fileURLToPath } from 'url';
+
+// Import Baileys as a CommonJS module
+import pkg from '@whiskeysockets/baileys';
+const {
   makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  generatePairingCode,
   getContentType,
-  DisconnectReason
-} from '@whiskeysockets/baileys';
-import { fileURLToPath } from 'url';
+  DisconnectReason,
+  generatePairingCode
+} = pkg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,7 +32,7 @@ async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const { version } = await fetchLatestBaileysVersion();
 
-  // Generate pairing code
+  // Generate pairing code (no QR)
   const { pairingCode } = await generatePairingCode({ auth: state });
   PAIRING_CODE = pairingCode;
   console.log('Your pairing code:', PAIRING_CODE);
@@ -67,12 +69,6 @@ async function startBot() {
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0];
     if (!msg || msg.key.remoteJid !== 'status@broadcast') return;
-
-    const contentType = getContentType(msg.message);
-    const messageContent =
-      contentType === 'ephemeralMessage'
-        ? msg.message.ephemeralMessage.message
-        : msg.message;
 
     const emojis = ['🔥', '💯', '💥', '😎', '❤️'];
     const react = emojis[Math.floor(Math.random() * emojis.length)];
@@ -113,6 +109,4 @@ app.get('/', (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
