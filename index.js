@@ -1,112 +1,101 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
 import express from 'express';
-import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
-
-// Import Baileys as a CommonJS module
-import pkg from '@whiskeysockets/baileys';
-const {
+import pino from 'pino';
+import {
   makeWASocket,
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
   getContentType,
-  DisconnectReason,
-  generatePairingCode
-} = pkg;
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+  delay,
+  makeCacheableSignalKeyStore,
+  jidNormalizedUser
+} from '@whiskeysockets/baileys';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-const sessionDir = path.join(__dirname, 'session');
-if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
-
-let PAIRING_CODE = null;
-
-async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-  const { version } = await fetchLatestBaileysVersion();
-
-  // Generate pairing code (no QR)
-  const { pairingCode } = await generatePairingCode({ auth: state });
-  PAIRING_CODE = pairingCode;
-  console.log('Your pairing code:', PAIRING_CODE);
-
-  const sock = makeWASocket({
-    auth: state,
-    version,
-    printQRInTerminal: false,
-    browser: ["Status-Bot", "Chrome", "1.0"]
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
-
-    if (connection === 'open') {
-      console.log('✅ WhatsApp Connected!');
-      PAIRING_CODE = null; // clear code once connected
-    }
-
-    if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      if (statusCode !== DisconnectReason.loggedOut) {
-        console.log('❌ Connection lost, reconnecting...');
-        startBot();
-      } else {
-        console.log('❌ Logged out. Please pair again.');
-      }
-    }
-  });
-
-  // Auto react to statuses
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg || msg.key.remoteJid !== 'status@broadcast') return;
-
-    const emojis = ['🔥', '💯', '💥', '😎', '❤️'];
-    const react = emojis[Math.floor(Math.random() * emojis.length)];
-
-    try {
-      await sock.sendMessage(msg.key.remoteJid, {
-        react: { text: react, key: msg.key }
-      });
-      console.log(`Reacted to status with ${react}`);
-    } catch (e) {
-      console.error('Failed to react:', e);
-    }
-  });
+function removeFolder(path) {
+  try {
+    fs.rmSync(path, { recursive: true, force: true });
+  } catch {}
 }
 
-startBot();
+app.get('/', async (req, res) => {
+  let number = req.query.number;
 
-// Web page showing pairing code
-app.get('/', (req, res) => {
-  if (PAIRING_CODE) {
+  if (!number) {
     return res.send(`
-      <html>
-        <body style="font-family:sans-serif;text-align:center">
-          <h2>Enter this pairing code in your WhatsApp mobile</h2>
-          <h1 style="color:blue">${PAIRING_CODE}</h1>
-        </body>
-      </html>
+      <h2>Missing number</h2>
+      <p>Use: <b>/?number=254712345678</b></p>
     `);
-  } else {
+  }
+
+  number = number.replace(/[^0-9]/g, '');
+  const sessionDir = './session-' + number;
+
+  removeFolder(sessionDir);
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+  const logger = pino({ level: "fatal" });
+
+  const sock = makeWASocket({
+    printQRInTerminal: false,
+    browser: ["PAIR-MODE", "Chrome", "1.0"],
+    logger,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger)
+    }
+  });
+
+  sock.ev.on("creds.update", saveCreds);
+
+  // generate pairing code (your fork supports THIS)
+  if (!state.creds.registered) {
+    await delay(1500);
+    const code = await sock.requestPairingCode(number);
+
+    console.log("PAIRING CODE:", code);
+
     return res.send(`
       <html>
         <body style="font-family:sans-serif;text-align:center">
-          <h2>WhatsApp is connected!</h2>
-          <p>Status viewing and auto-react enabled.</p>
+          <h2>Enter this pairing code in WhatsApp</h2>
+          <h1 style="font-size:55px;color:blue">${code}</h1>
+          <p>WhatsApp → Linked Devices → Link with Phone Number</p>
         </body>
       </html>
     `);
   }
+
+  // Auto view + react to statuses
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const msg = messages[0];
+    if (!msg || msg.key.remoteJid !== "status@broadcast") return;
+
+    const emojis = ["🔥", "❤️", "💯", "😎", "✨"];
+    const react = emojis[Math.floor(Math.random() * emojis.length)];
+
+    try {
+      await sock.sendMessage("status@broadcast", {
+        react: { text: react, key: msg.key }
+      });
+      console.log("Reacted:", react);
+    } catch (err) {
+      console.log("Reaction failed:", err);
+    }
+  });
+
+  sock.ev.on("connection.update", async ({ connection }) => {
+    if (connection === "open") {
+      console.log("BOT CONNECTED");
+
+      const jid = jidNormalizedUser(number + "@s.whatsapp.net");
+
+      await sock.sendMessage(jid, {
+        text: "Your bot is now connected 🔥\nAuto View + React enabled."
+      });
+    }
+  });
 });
 
-app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
